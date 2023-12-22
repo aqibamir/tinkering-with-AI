@@ -116,7 +116,8 @@ def main():
     st.text_area("Story Prompt", placeholder="Give me a starter !!", height=40, key="helping_prompt")
 
     if st.button("Generate"):
-        title, story = generate()
+        with st.spinner("I'm generating the story !!!"):
+            title, story = generate()
 
         # Display the title
         st.subheader("Title")
