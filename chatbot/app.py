@@ -1,7 +1,5 @@
-
-__import__('pysqlite3')
 import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+__import__('pysqlite3')
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -19,36 +17,12 @@ from langchain_core.messages import get_buffer_string
 from langchain_core.output_parsers import StrOutputParser
 from langchain.llms import OpenAI
 
-# Creates chunks of the PDF file
-def process_pdf(filename):
-    text = ""
-    pdf_reader = PdfReader(filename)
-    for page in pdf_reader.pages:
-        text += page.extract_text()
 
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=20,
-        length_function=len
-    )
-
-    metadata = [{"book_name": filename} for i in range(len(text))]
-    chunks = text_splitter.create_documents(texts=[text],metadatas=metadata)
-
-    return chunks
+load_dotenv()
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 
 
-def get_vectorstore():
-    embeddings = OpenAIEmbeddings()
-
-    crime_and_punishment = process_pdf('cap.pdf')
-    alchemist = process_pdf('alchemist.pdf')
-
-    vectorstore = Chroma.from_documents(embedding=embeddings, documents= alchemist+ crime_and_punishment)
-
-    return vectorstore
-
-
+# Prompt templates 
 CONDENSE_QUESTION_PROMPT = PromptTemplate.from_template("""Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question, in its original language.
 
  === CHAT HISTORY ===
@@ -80,16 +54,54 @@ USER QUESTIONN: {question}
 
 DEFAULT_DOCUMENT_PROMPT = PromptTemplate.from_template(template="{page_content}")
 
+def process_pdf(filename):
+    """ Processes a PDF file and returns its content in chunks """
+    
+    text = ""
+    pdf_reader = PdfReader(filename)
+    for page in pdf_reader.pages:
+        text += page.extract_text()
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=20,
+        length_function=len
+    )
+
+    metadata = [{"book_name": filename} for i in range(len(text))]
+    chunks = text_splitter.create_documents(texts=[text],metadatas=metadata)
+
+    return chunks
+
+def get_vectorstore():
+    embeddings = OpenAIEmbeddings()
+
+    crime_and_punishment = process_pdf('cap.pdf')
+    alchemist = process_pdf('alchemist.pdf')
+
+    vectorstore = Chroma.from_documents(embedding = embeddings, documents = alchemist + crime_and_punishment)
+
+    return vectorstore
 
 def _combine_documents(docs, document_prompt=DEFAULT_DOCUMENT_PROMPT, document_separator="\n\n"):
+    """ Combines a list of documents into a single formatted string """
     doc_strings = [format_document(doc, document_prompt) for doc in docs]
     return document_separator.join(doc_strings)
 
+def handle_user_input(user_question,memory,retriever,llm):
+    """Generates a response to a user question based on chat history and retrieved documents.
 
-def get_response(user_question,memory,retriever,llm):
-    # First create the chain to condense the chat history
+    Args:
+        user_question (str): User's question.
+        memory (ConversationBufferMemory): Conversation buffer memory.
+        retriever: Document retriever.
+        llm: Large language model.
 
-    # Fetching the chat history
+    Returns:
+        str: AI generated response.
+    """
+
+    # Fetching chat history
     past_messages = get_buffer_string(memory.load_memory_variables({})['history'])
 
     # Generating a standalone question to retrieve relevant documents
@@ -100,21 +112,16 @@ def get_response(user_question,memory,retriever,llm):
     get_documents_chain = retriever | _combine_documents
     context = get_documents_chain.invoke(standalone_question)
 
-    print(context)
-
     # Chain to generate final answer based on context , user question and chat history
     final_answer_chain = ANSWER_PROMPT | ChatOpenAI() | StrOutputParser()
     response = final_answer_chain.invoke({"context": context, "question": user_question,"chat_history":past_messages}) 
 
-    # Saving the response
+    # Saving the response in memory
     memory.save_context({'question':user_question}, {'answer':response})
     
     return response
 
-
-    
 def main():
-    load_dotenv()
     st.set_page_config(page_title="Chat PDF BOOK", page_icon=":books:")
 
     st.header("Chat with 'The Alchemist' and 'Crime and Punishemt' :books:")
@@ -134,9 +141,11 @@ def main():
         msgs.add_user_message(prompt)
 
         # Get the chat response 
-        response = get_response(prompt , st.session_state['memory'], st.session_state['retriever'], OpenAI())
+        response = handle_user_input(prompt , st.session_state['memory'], st.session_state['retriever'], OpenAI())
 
         st.chat_message("ai").write(response)
         msgs.add_ai_message(response)
-main()
+
+if __name__ == "__main__":
+    main()
 
