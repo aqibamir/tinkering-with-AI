@@ -1,36 +1,33 @@
 import sys
+import os
 __import__('pysqlite3')
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 
-import streamlit as st
-from dotenv import load_dotenv
 from PyPDF2 import PdfReader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import Chroma
+from dotenv import load_dotenv
+from langchain.callbacks.tracers import ConsoleCallbackHandler
 from langchain.chat_models import ChatOpenAI
-from langchain.memory import ConversationBufferMemory
-from langchain.memory import StreamlitChatMessageHistory
-from langchain.prompts import PromptTemplate
-from langchain.prompts import ChatPromptTemplate
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.llms import OpenAI
+from langchain.memory import ConversationBufferMemory, StreamlitChatMessageHistory
+from langchain.prompts import ChatPromptTemplate, PromptTemplate
 from langchain.schema import format_document
 from langchain_core.messages import get_buffer_string
 from langchain_core.output_parsers import StrOutputParser
-from langchain.llms import OpenAI
-
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import Chroma
+import streamlit as st
 
 load_dotenv()
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
-
 
 # Prompt templates 
-CONDENSE_QUESTION_PROMPT = PromptTemplate.from_template("""Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question, in its original language.
-
- === CHAT HISTORY ===
-       {chat_history}
-
- ====================
+CONDENSE_QUESTION_PROMPT = PromptTemplate.from_template("""
                                                         
-==== Follow Up Input ===
+                                                        
+Given the following conversation and a follow up question by the user. You need to creat a standalon question that enhances the user question by including keywords that would
+help a search algorithm find the relevant documents using semantic search. The grammatical structure of the question does not matter.
+                                                        
+==== FOLLOW UP QUESTION ===
     {question}
 ========================
                                                         
@@ -38,13 +35,14 @@ Standalone question:"""
 )
 
 ANSWER_PROMPT = ChatPromptTemplate.from_template("""You are an assistant who is answering user questions about some books. Some excrepts from the book
- are given as ```context``` below. Also the previous chat history with the user is also given. You have to now answer the user question the question based only on this information.
+ are given as ```context``` below. You have to now answer the user question the question based only on this information. The response should not include sentences
+ like 'Based on the context' unless you can not infer the user questions answer from the context.   
 
-    === CHAT HISTORY ===
-       {chat_history}
+=== CHAT HISTORY ===
+    {chat_history}
 
-    ====================
-
+====================
+                                                 
     === CONTEXT ===
        {context}
     ===============
@@ -63,8 +61,8 @@ def process_pdf(filename):
         text += page.extract_text()
 
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=20,
+        chunk_size=1000,
+        chunk_overlap=100,
         length_function=len
     )
 
@@ -74,12 +72,17 @@ def process_pdf(filename):
     return chunks
 
 def get_vectorstore():
+    persist_directory = './db'
     embeddings = OpenAIEmbeddings()
-
-    crime_and_punishment = process_pdf('cap.pdf')
-    alchemist = process_pdf('alchemist.pdf')
-
-    vectorstore = Chroma.from_documents(embedding = embeddings, documents = alchemist + crime_and_punishment)
+    chunks = []
+    if not os.path.exists(persist_directory):
+        crime_and_punishment = process_pdf('./books/cap.pdf')
+        alchemist = process_pdf('./books/alchemist.pdf')
+        chunks = crime_and_punishment + alchemist
+        vectorstore = Chroma.from_documents(embedding = embeddings, documents = chunks,persist_directory = persist_directory)
+        return vectorstore
+    
+    vectorstore = Chroma(embedding_function = embeddings, persist_directory = persist_directory)
 
     return vectorstore
 
@@ -105,16 +108,16 @@ def handle_user_input(user_question,memory,retriever,llm):
     past_messages = get_buffer_string(memory.load_memory_variables({})['history'])
 
     # Generating a standalone question to retrieve relevant documents
-    standalone_question_chain = CONDENSE_QUESTION_PROMPT | ChatOpenAI(temperature=0) | StrOutputParser()
-    standalone_question = standalone_question_chain.invoke({"chat_history":past_messages,"question":user_question})
+    standalone_question_chain = CONDENSE_QUESTION_PROMPT | ChatOpenAI(model = 'gpt-3.5-turbo-1106',temperature = 0) | StrOutputParser()
+    standalone_question = standalone_question_chain.invoke({"chat_history":past_messages,"question":user_question},config = {'callbacks': [ConsoleCallbackHandler()]})
     
     # Chain to fetch documents for in memory context
     get_documents_chain = retriever | _combine_documents
     context = get_documents_chain.invoke(standalone_question)
 
     # Chain to generate final answer based on context , user question and chat history
-    final_answer_chain = ANSWER_PROMPT | ChatOpenAI() | StrOutputParser()
-    response = final_answer_chain.invoke({"context": context, "question": user_question,"chat_history":past_messages}) 
+    final_answer_chain = ANSWER_PROMPT | ChatOpenAI(model = 'gpt-3.5-turbo-1106',temperature = 0) | StrOutputParser()
+    response = final_answer_chain.invoke({"context": context, "question": user_question,"chat_history":past_messages},config = {'callbacks': [ConsoleCallbackHandler()]}) 
 
     # Saving the response in memory
     memory.save_context({'question':user_question}, {'answer':response})
@@ -128,7 +131,7 @@ def main():
 
     if 'vector_store' not in st.session_state:
         st.session_state['vector_store'] = get_vectorstore()
-        st.session_state['retriever'] = st.session_state['vector_store'].as_retriever()
+        st.session_state['retriever'] = st.session_state['vector_store'].as_retriever(search_kwargs={"k": 5})
         st.session_state['memory'] = ConversationBufferMemory( memory_key='history', return_messages=True, output_key="answer", input_key="question")
 
     msgs = StreamlitChatMessageHistory(key="chat_history")
